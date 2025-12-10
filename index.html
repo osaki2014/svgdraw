@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>SVG 手描き ＋ コード連動エディタ（グリッド＆Undo＆円弧）</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    html,body{
+      height:100%;
+      font-family: system-ui,-apple-system,BlinkMacSystemFont,"M PLUS Rounded 1c",sans-serif;
+      background:#f0f2f5;
+      color:#222;
+    }
+    #app{
+      height:100%;
+      display:flex;
+      flex-direction:column;
+    }
+    header{
+      padding:8px 12px;
+      background:#ffffff;
+      border-bottom:1px solid #ddd;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:8px;
+    }
+    header .title{
+      font-size:14px;
+      font-weight:600;
+    }
+    .leftHeader{
+      display:flex;
+      align-items:center;
+      gap:12px;
+    }
+    .modeButtons{
+      display:flex;
+      gap:4px;
+      background:#f3f4f6;
+      border-radius:999px;
+      padding:2px;
+    }
+    .modeButtons button{
+      border:none;
+      background:transparent;
+      padding:3px 10px;
+      font-size:11px;
+      border-radius:999px;
+      cursor:pointer;
+      white-space:nowrap;
+    }
+    .modeButtons button.active{
+      background:#111827;
+      color:#f9fafb;
+    }
+
+    header .buttons{
+      display:flex;
+      gap:8px;
+    }
+    button.toolBtn{
+      padding:4px 10px;
+      font-size:12px;
+      border-radius:999px;
+      border:1px solid #ccc;
+      background:#fff;
+      cursor:pointer;
+    }
+    button.toolBtn:hover{
+      background:#f5f5f5;
+    }
+
+    .main{
+      flex:1;
+      display:flex;
+      min-height:0;
+    }
+    .pane{
+      flex:1;
+      min-width:0;
+      display:flex;
+      flex-direction:column;
+    }
+    .pane-left{
+      border-right:1px solid #ddd;
+    }
+    .pane-title{
+      font-size:12px;
+      padding:6px 10px;
+      background:#fafafa;
+      border-bottom:1px solid #eee;
+    }
+    #svgPane{
+      flex:1;
+      background:#fff;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:8px;
+    }
+    #svgPane svg{
+      width:100%;
+      height:100%;
+      touch-action:none; /* ペン操作用 */
+    }
+
+    #codeArea{
+      flex:1;
+      width:100%;
+      resize:none;
+      border:none;
+      outline:none;
+      padding:8px;
+      font-size:12px;
+      font-family: SFMono-Regular,Menlo,Consolas,monospace;
+      background:#111827;
+      color:#e5e7eb;
+      line-height:1.4;
+      tab-size:2;
+      white-space:pre;
+    }
+    #errorBox{
+      min-height:1.5em;
+      padding:4px 8px;
+      font-size:11px;
+      color:#b91c1c;
+      background:#fef2f2;
+      border-top:1px solid #fecaca;
+      display:none;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+
+    @media (max-width:800px){
+      .main{
+        flex-direction:column;
+      }
+      .pane-left{
+        border-right:none;
+        border-bottom:1px solid #ddd;
+      }
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="leftHeader">
+      <div class="title">SVG 手描き ＋ コード連動エディタ</div>
+      <div class="modeButtons">
+        <button id="modeFree"  class="active">曲線（フリーハンド）</button>
+        <button id="modeLine">直線</button>
+        <button id="modeArc">円弧（ベジェ）</button>
+        <button id="modeCircleArc">円弧（真円）</button>
+      </div>
+    </div>
+    <div class="buttons">
+      <button id="clearBtn" class="toolBtn">描画をクリア</button>
+      <button id="downloadBtn" class="toolBtn">SVGを保存</button>
+    </div>
+  </header>
+
+  <div class="main">
+    <!-- 左：SVGプレビュー -->
+    <div class="pane pane-left">
+      <div class="pane-title">プレビュー（グリッド上にドラッグして描画 / Ctrl+Zで戻る）</div>
+      <div id="svgPane"></div>
+    </div>
+
+    <!-- 右：SVGコード -->
+    <div class="pane pane-right">
+      <div class="pane-title">SVGコード（編集すると左が更新）</div>
+      <textarea id="codeArea" spellcheck="false"></textarea>
+      <div id="errorBox"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const svgPane     = document.getElementById('svgPane');
+  const codeArea    = document.getElementById('codeArea');
+  const errorBox    = document.getElementById('errorBox');
+  const clearBtn    = document.getElementById('clearBtn');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const modeFreeBtn = document.getElementById('modeFree');
+  const modeLineBtn = document.getElementById('modeLine');
+  const modeArcBtn  = document.getElementById('modeArc');
+  const modeCircleArcBtn = document.getElementById('modeCircleArc');
+
+  const svgNS = "http://www.w3.org/2000/svg";
+  let svgElem = null;
+
+  let isUpdatingFromCode = false;
+  let isUpdatingFromDraw = false;
+
+  // 描画モード: 'free' | 'line' | 'arc' | 'circleArc'
+  let drawMode = 'free';
+
+  // グリッド設定
+  const GRID_SIZE = 10; // スナップ＆グリッドの間隔
+
+  // Undo 用スタック
+  const undoStack = [];
+  const UNDO_LIMIT = 50;
+
+  // スナップカーソル（赤丸）
+  let snapCursor = null;
+
+  // ---- 初期SVG ----
+  const initialSVG = `
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 500 500">
+  <rect x="0" y="0" width="500" height="500" fill="white"/>
+</svg>`.trim();
+
+  // ---- viewBox がなければ付ける ----
+  function ensureViewBox(){
+    if (!svgElem) return;
+    if (!svgElem.hasAttribute('viewBox')){
+      svgElem.setAttribute('viewBox','0 0 500 500');
+    } else {
+      const vb = svgElem.viewBox.baseVal;
+      if (vb.width === 0 || vb.height === 0){
+        svgElem.setAttribute('viewBox','0 0 500 500');
+      }
+    }
+  }
+
+  // ---- グリッド表示をSVGに埋め込む ----
+  function ensureGrid(){
+    if (!svgElem) return;
+    ensureViewBox();
+    const vb = svgElem.viewBox.baseVal;
+
+    // defs 確保
+    let defs = svgElem.querySelector('defs');
+    if (!defs){
+      defs = document.createElementNS(svgNS,'defs');
+      svgElem.insertBefore(defs, svgElem.firstChild);
+    }
+
+    // パターン定義（薄いグリッド線）
+    let pattern = svgElem.querySelector('#gridPattern');
+    if (!pattern){
+      pattern = document.createElementNS(svgNS,'pattern');
+      pattern.setAttribute('id','gridPattern');
+      pattern.setAttribute('patternUnits','userSpaceOnUse');
+      pattern.setAttribute('width', GRID_SIZE);
+      pattern.setAttribute('height', GRID_SIZE);
+
+      // 背景（真っ白）＋グリッド線
+      const bgCell = document.createElementNS(svgNS,'rect');
+      bgCell.setAttribute('x','0');
+      bgCell.setAttribute('y','0');
+      bgCell.setAttribute('width', GRID_SIZE);
+      bgCell.setAttribute('height', GRID_SIZE);
+      bgCell.setAttribute('fill','#ffffff');
+
+      const path = document.createElementNS(svgNS,'path');
+      path.setAttribute('d', `M ${GRID_SIZE} 0 L 0 0 0 ${GRID_SIZE}`);
+      path.setAttribute('fill','none');
+      path.setAttribute('stroke','#e0e0e0');
+      path.setAttribute('stroke-width','0.5');
+      path.setAttribute('stroke-opacity','0.7');
+      path.setAttribute('shape-rendering','crispEdges');
+
+      pattern.appendChild(bgCell);
+      pattern.appendChild(path);
+      defs.appendChild(pattern);
+    }
+
+    // 既存の「全体を覆う白いrect」があれば、それをグリッド背景にする
+    let bg = null;
+    const rects = svgElem.querySelectorAll('rect');
+    for (const r of rects){
+      if (r.hasAttribute('data-grid-bg')) {
+        bg = r;
+        break;
+      }
+      const x = parseFloat(r.getAttribute('x') || '0');
+      const y = parseFloat(r.getAttribute('y') || '0');
+      const w = parseFloat(r.getAttribute('width')  || '0');
+      const h = parseFloat(r.getAttribute('height') || '0');
+      const fill = (r.getAttribute('fill') || '').toLowerCase();
+      if (x === vb.x && y === vb.y && w === vb.width && h === vb.height &&
+          (fill === 'white' || fill === '#ffffff')){
+        bg = r;
+        break;
+      }
+    }
+
+    if (!bg){
+      // なければ新規で作る
+      bg = document.createElementNS(svgNS,'rect');
+      svgElem.insertBefore(bg, svgElem.firstChild);
+    }
+    bg.setAttribute('x', vb.x);
+    bg.setAttribute('y', vb.y);
+    bg.setAttribute('width', vb.width);
+    bg.setAttribute('height', vb.height);
+    bg.setAttribute('fill','url(#gridPattern)');
+    bg.setAttribute('data-grid-bg','1');
+  }
+
+  // ---- スナップカーソル（赤丸）を用意 ----
+  function ensureSnapCursor(){
+    if (!svgElem) return;
+    snapCursor = svgElem.querySelector('#snapCursor');
+    if (!snapCursor){
+      snapCursor = document.createElementNS(svgNS,'circle');
+      snapCursor.setAttribute('id','snapCursor');
+      snapCursor.setAttribute('r','2.5');
+      snapCursor.setAttribute('fill','#ef4444'); // 赤
+      snapCursor.setAttribute('stroke','none');
+      snapCursor.setAttribute('pointer-events','none');
+      snapCursor.style.display = 'none';
+      svgElem.appendChild(snapCursor);
+    }
+  }
+
+  function updateSnapCursor(p){
+    if (!svgElem || !snapCursor || !p) return;
+    snapCursor.setAttribute('cx', p.x.toFixed(1));
+    snapCursor.setAttribute('cy', p.y.toFixed(1));
+    snapCursor.style.display = 'block';
+    // 常に一番上に来るように最後にappend
+    svgElem.appendChild(snapCursor);
+  }
+
+  function hideSnapCursor(){
+    if (snapCursor){
+      snapCursor.style.display = 'none';
+    }
+  }
+
+  // ---- SVG文字列 → プレビューに反映 ----
+  function setSVGFromString(str){
+    errorBox.style.display = 'none';
+    errorBox.textContent = '';
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(str, 'image/svg+xml');
+    const parserError = doc.querySelector('parsererror');
+    if (parserError){
+      errorBox.style.display = 'block';
+      errorBox.textContent = 'SVGの構文エラーがあります：' +
+        parserError.textContent.replace(/\s+/g,' ').slice(0,200);
+      return;
+    }
+
+    const newSvg = doc.documentElement;
+    if (!newSvg || newSvg.tagName.toLowerCase() !== 'svg'){
+      errorBox.style.display = 'block';
+      errorBox.textContent = '<svg> タグが見つかりません。';
+      return;
+    }
+
+    svgPane.innerHTML = '';
+    svgElem = newSvg;
+    svgElem.setAttribute('width','100%');
+    svgElem.setAttribute('height','100%');
+    svgPane.appendChild(svgElem);
+
+    ensureGrid();
+    ensureSnapCursor();
+    attachDrawingHandlers();
+  }
+
+  // ---- プレビュー側のSVG → コード文字列に反映 ----
+  // ※スナップカーソル(#snapCursor)は保存用コードからは除外
+  function getSVGString(){
+    if (!svgElem) return '';
+    const clone = svgElem.cloneNode(true);
+    const marker = clone.querySelector('#snapCursor');
+    if (marker) marker.remove();
+    const serializer = new XMLSerializer();
+    return serializer.serializeToString(clone);
+  }
+
+  function syncCodeFromSVG(){
+    if (!svgElem) return;
+    if (isUpdatingFromCode) return;
+    isUpdatingFromDraw = true;
+    codeArea.value = getSVGString();
+    isUpdatingFromDraw = false;
+  }
+
+  // ---- Undo スタック操作 ----
+  function pushUndo(){
+    if (!svgElem) return;
+    const snapshot = getSVGString();
+    // 直前と同じなら積まない
+    if (undoStack.length > 0 && undoStack[undoStack.length - 1] === snapshot) return;
+    undoStack.push(snapshot);
+    if (undoStack.length > UNDO_LIMIT){
+      undoStack.shift();
+    }
+  }
+
+  function performUndo(){
+    if (undoStack.length <= 1) return;
+    // 現在を捨てて 1 つ前へ
+    undoStack.pop();
+    const prev = undoStack[undoStack.length - 1];
+    isUpdatingFromCode = true;
+    setSVGFromString(prev);
+    codeArea.value = getSVGString();
+    isUpdatingFromCode = false;
+  }
+
+  // Ctrl+Z / Cmd+Z
+  window.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z'){
+      e.preventDefault();
+      performUndo();
+    }
+  });
+
+  // ---- コード編集 → プレビューに反映（デバウンス） ----
+  let codeTimer = null;
+  codeArea.addEventListener('input', () => {
+    if (isUpdatingFromDraw) return;
+    clearTimeout(codeTimer);
+    codeTimer = setTimeout(() => {
+      isUpdatingFromCode = true;
+      setSVGFromString(codeArea.value);
+      pushUndo();
+      isUpdatingFromCode = false;
+    }, 300);
+  });
+
+  // ---- スナップ処理 ----
+  function snapToGrid(x, y){
+    const sx = Math.round(x / GRID_SIZE) * GRID_SIZE;
+    const sy = Math.round(y / GRID_SIZE) * GRID_SIZE;
+    return {x:sx, y:sy};
+  }
+
+  // ---- 手描き用イベント ----
+  let drawing = false;
+  let currentPath = null;
+  let currentD = '';
+  let lineStart = null;   // 直線・円弧用の始点
+  let arcStart = null;
+  let arcEnd   = null;
+
+  function getSVGCoords(evt){
+    const rect = svgElem.getBoundingClientRect();
+    const x = evt.clientX - rect.left;
+    const y = evt.clientY - rect.top;
+
+    const vb = svgElem.viewBox.baseVal;
+    const sx = vb.width / rect.width;
+    const sy = vb.height / rect.height;
+
+    let px = vb.x + x * sx;
+    let py = vb.y + y * sy;
+
+    // グリッドにスナップ
+    const snapped = snapToGrid(px, py);
+    return snapped;
+  }
+
+  // 円弧（ベジェ）のパス生成
+  function buildArcPathD(start, end){
+    const sx = start.x, sy = start.y;
+    const ex = end.x,   ey = end.y;
+    const mx = (sx + ex) / 2;
+    const my = (sy + ey) / 2;
+    const dx = ex - sx;
+    const dy = ey - sy;
+    const k = 0.3; // 曲がり具合
+    const cx = mx - dy * k;
+    const cy = my + dx * k;
+    return `M ${sx.toFixed(1)} ${sy.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}`;
+  }
+
+  // 円弧（真円）のパス生成（半円弧）
+  function buildCircleArcPathD(start, end){
+    const sx = start.x, sy = start.y;
+    const ex = end.x,   ey = end.y;
+    const dx = ex - sx;
+    const dy = ey - sy;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if (dist === 0) {
+      return `M ${sx.toFixed(1)} ${sy.toFixed(1)}`;
+    }
+    const r = Math.max(dist / 2, 1); // 半円に必要な最小半径
+    const laf = 0; // large-arc-flag
+    const sweep = 1; // 向き
+    return `M ${sx.toFixed(1)} ${sy.toFixed(1)} A ${r.toFixed(1)} ${r.toFixed(1)} 0 ${laf} ${sweep} ${ex.toFixed(1)} ${ey.toFixed(1)}`;
+  }
+
+  function onPointerDown(evt){
+    if (evt.button !== 0) return; // 左クリックのみ
+    if (!svgElem) return;
+    drawing = true;
+    svgElem.setPointerCapture(evt.pointerId);
+    const p = getSVGCoords(evt);
+    updateSnapCursor(p);
+
+    if (drawMode === 'free'){
+      currentD = `M ${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
+
+      currentPath = document.createElementNS(svgNS,'path');
+      currentPath.setAttribute('d', currentD);
+      currentPath.setAttribute('fill','none');
+      currentPath.setAttribute('stroke','#000');
+      currentPath.setAttribute('stroke-width','2');
+      currentPath.setAttribute('stroke-linecap','round');
+      currentPath.setAttribute('stroke-linejoin','round');
+      svgElem.appendChild(currentPath);
+
+    } else if (drawMode === 'line'){
+      lineStart = {x:p.x, y:p.y};
+      currentPath = document.createElementNS(svgNS,'path');
+      const d = `M ${lineStart.x.toFixed(1)} ${lineStart.y.toFixed(1)} L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
+      currentPath.setAttribute('d', d);
+      currentPath.setAttribute('fill','none');
+      currentPath.setAttribute('stroke','#000');
+      currentPath.setAttribute('stroke-width','2');
+      currentPath.setAttribute('stroke-linecap','round');
+      svgElem.appendChild(currentPath);
+
+    } else if (drawMode === 'arc' || drawMode === 'circleArc'){
+      arcStart = {x:p.x, y:p.y};
+      arcEnd   = {x:p.x, y:p.y};
+      currentPath = document.createElementNS(svgNS,'path');
+      const d = (drawMode === 'arc')
+        ? buildArcPathD(arcStart, arcEnd)
+        : buildCircleArcPathD(arcStart, arcEnd);
+      currentPath.setAttribute('d', d);
+      currentPath.setAttribute('fill','none');
+      currentPath.setAttribute('stroke','#000');
+      currentPath.setAttribute('stroke-width','2');
+      currentPath.setAttribute('stroke-linecap','round');
+      currentPath.setAttribute('stroke-linejoin','round');
+      svgElem.appendChild(currentPath);
+    }
+
+    evt.preventDefault();
+  }
+
+  function onPointerMove(evt){
+    if (!svgElem) return;
+    const p = getSVGCoords(evt);
+    updateSnapCursor(p);
+
+    if (!drawing || !currentPath) return;
+
+    if (drawMode === 'free'){
+      currentD += ` L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
+      currentPath.setAttribute('d', currentD);
+    } else if (drawMode === 'line'){
+      if (!lineStart) return;
+      const d = `M ${lineStart.x.toFixed(1)} ${lineStart.y.toFixed(1)} L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
+      currentPath.setAttribute('d', d);
+    } else if (drawMode === 'arc' || drawMode === 'circleArc'){
+      if (!arcStart) return;
+      arcEnd = {x:p.x, y:p.y};
+      const d = (drawMode === 'arc')
+        ? buildArcPathD(arcStart, arcEnd)
+        : buildCircleArcPathD(arcStart, arcEnd);
+      currentPath.setAttribute('d', d);
+    }
+
+    evt.preventDefault();
+  }
+
+  function endDrawing(evt){
+    if (!drawing) return;
+    drawing = false;
+    if (svgElem){
+      try{ svgElem.releasePointerCapture(evt.pointerId); }catch(_){}
+    }
+    currentPath = null;
+    currentD = '';
+    lineStart = null;
+    arcStart = null;
+    arcEnd = null;
+
+    syncCodeFromSVG();
+    pushUndo(); // 描き終わりを Undo スナップショットに
+  }
+
+  function onPointerLeave(evt){
+    hideSnapCursor();
+    if (drawing){
+      endDrawing(evt);
+    }
+  }
+
+  function attachDrawingHandlers(){
+    if (!svgElem) return;
+
+    svgElem.removeEventListener('pointerdown', onPointerDown);
+    svgElem.removeEventListener('pointermove', onPointerMove);
+    svgElem.removeEventListener('pointerup',   endDrawing);
+    svgElem.removeEventListener('pointercancel', endDrawing);
+    svgElem.removeEventListener('pointerleave', onPointerLeave);
+
+    svgElem.addEventListener('pointerdown', onPointerDown);
+    svgElem.addEventListener('pointermove', onPointerMove);
+    svgElem.addEventListener('pointerup',   endDrawing);
+    svgElem.addEventListener('pointercancel', endDrawing);
+    svgElem.addEventListener('pointerleave', onPointerLeave);
+  }
+
+  // ---- ボタン（描画クリア） ----
+  clearBtn.addEventListener('click', () => {
+    if (!svgElem) return;
+    const toRemove = svgElem.querySelectorAll('path, polyline');
+    toRemove.forEach(el => el.remove());
+    syncCodeFromSVG();
+    pushUndo();
+  });
+
+  // ---- ボタン（ダウンロード） ----
+  downloadBtn.addEventListener('click', () => {
+    const blob = new Blob([getSVGString()], {type:'image/svg+xml'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'drawing.svg';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  // ---- 描画モード切り替え ----
+  function setMode(mode){
+    drawMode = mode;
+    modeFreeBtn.classList.toggle('active',      mode === 'free');
+    modeLineBtn.classList.toggle('active',      mode === 'line');
+    modeArcBtn.classList.toggle('active',       mode === 'arc');
+    modeCircleArcBtn.classList.toggle('active', mode === 'circleArc');
+  }
+
+  modeFreeBtn.addEventListener('click', () => setMode('free'));
+  modeLineBtn.addEventListener('click', () => setMode('line'));
+  modeArcBtn .addEventListener('click', () => setMode('arc'));
+  modeCircleArcBtn.addEventListener('click', () => setMode('circleArc'));
+
+  // ---- 初期化 ----
+  setSVGFromString(initialSVG);
+  codeArea.value = getSVGString();
+  // 初期状態を Undo スタックに積む
+  pushUndo();
+})();
+</script>
+</body>
+</html>
