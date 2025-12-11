@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <title>SVG 手描き ＋ コード連動エディタ（グリッド＆Undo＆円弧）</title>
+  <title>SVG 手描き ＋ コード連動エディタ（グリッド＆Undo＆円弧＋塗り＆消しゴム）</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     *{box-sizing:border-box;margin:0;padding:0;}
@@ -34,6 +34,7 @@
       display:flex;
       align-items:center;
       gap:12px;
+      flex-wrap:wrap;
     }
     .modeButtons{
       display:flex;
@@ -41,6 +42,7 @@
       background:#f3f4f6;
       border-radius:999px;
       padding:2px;
+      flex-wrap:wrap;
     }
     .modeButtons button{
       border:none;
@@ -56,9 +58,26 @@
       color:#f9fafb;
     }
 
+    .colorPickerWrap{
+      display:flex;
+      align-items:center;
+      gap:4px;
+      font-size:11px;
+    }
+    .colorPickerWrap input[type="color"]{
+      width:22px;
+      height:22px;
+      padding:0;
+      border-radius:999px;
+      border:1px solid #ddd;
+      background:#fff;
+      cursor:pointer;
+    }
+
     header .buttons{
       display:flex;
       gap:8px;
+      flex-wrap:wrap;
     }
     button.toolBtn{
       padding:4px 10px;
@@ -134,6 +153,12 @@
       text-overflow:ellipsis;
     }
 
+    @media (max-width:900px){
+      header{
+        flex-direction:column;
+        align-items:flex-start;
+      }
+    }
     @media (max-width:800px){
       .main{
         flex-direction:column;
@@ -151,10 +176,16 @@
     <div class="leftHeader">
       <div class="title">SVG 手描き ＋ コード連動エディタ</div>
       <div class="modeButtons">
-        <button id="modeFree"  class="active">曲線（フリーハンド）</button>
+        <button id="modeFree"  class="active">曲線</button>
         <button id="modeLine">直線</button>
         <button id="modeArc">円弧（ベジェ）</button>
         <button id="modeCircleArc">円弧（真円）</button>
+        <button id="modeFill">塗りつぶし</button>
+        <button id="modeErase">消しゴム</button>
+      </div>
+      <div class="colorPickerWrap">
+        <span>色:</span>
+        <input type="color" id="colorPicker" value="#000000">
       </div>
     </div>
     <div class="buttons">
@@ -166,7 +197,9 @@
   <div class="main">
     <!-- 左：SVGプレビュー -->
     <div class="pane pane-left">
-      <div class="pane-title">プレビュー（グリッド上にドラッグして描画 / Ctrl+Zで戻る）</div>
+      <div class="pane-title">
+        プレビュー（グリッド上にドラッグ / Ctrl+Zで戻る / 赤丸＝スナップ点）
+      </div>
       <div id="svgPane"></div>
     </div>
 
@@ -190,6 +223,9 @@
   const modeLineBtn = document.getElementById('modeLine');
   const modeArcBtn  = document.getElementById('modeArc');
   const modeCircleArcBtn = document.getElementById('modeCircleArc');
+  const modeFillBtn = document.getElementById('modeFill');
+  const modeEraseBtn = document.getElementById('modeErase');
+  const colorPicker = document.getElementById('colorPicker');
 
   const svgNS = "http://www.w3.org/2000/svg";
   let svgElem = null;
@@ -197,8 +233,11 @@
   let isUpdatingFromCode = false;
   let isUpdatingFromDraw = false;
 
-  // 描画モード: 'free' | 'line' | 'arc' | 'circleArc'
+  // 描画モード: 'free' | 'line' | 'arc' | 'circleArc' | 'fill' | 'erase'
   let drawMode = 'free';
+
+  // 選択中の色（stroke / fill）
+  let currentColor = colorPicker.value || '#000000';
 
   // グリッド設定
   const GRID_SIZE = 10; // スナップ＆グリッドの間隔
@@ -263,7 +302,7 @@
       const path = document.createElementNS(svgNS,'path');
       path.setAttribute('d', `M ${GRID_SIZE} 0 L 0 0 0 ${GRID_SIZE}`);
       path.setAttribute('fill','none');
-      path.setAttribute('stroke','#e0e0e0');
+      path.setAttribute('stroke','#e5e7eb');
       path.setAttribute('stroke-width','0.5');
       path.setAttribute('stroke-opacity','0.7');
       path.setAttribute('shape-rendering','crispEdges');
@@ -433,6 +472,11 @@
     }, 300);
   });
 
+  // ---- 色変更 ----
+  colorPicker.addEventListener('input', () => {
+    currentColor = colorPicker.value || '#000000';
+  });
+
   // ---- スナップ処理 ----
   function snapToGrid(x, y){
     const sx = Math.round(x / GRID_SIZE) * GRID_SIZE;
@@ -495,13 +539,56 @@
     return `M ${sx.toFixed(1)} ${sy.toFixed(1)} A ${r.toFixed(1)} ${r.toFixed(1)} 0 ${laf} ${sweep} ${ex.toFixed(1)} ${ey.toFixed(1)}`;
   }
 
+  // クリック位置から図形（path, rect, circleなど）を探す
+  function findShapeElementFromEvent(evt){
+    const target = document.elementFromPoint(evt.clientX, evt.clientY);
+    if (!target) return null;
+    let el = target;
+    while (el && el !== svgElem){
+      const tag = el.tagName ? el.tagName.toLowerCase() : '';
+      if (['path','rect','circle','ellipse','polygon','polyline'].includes(tag)){
+        // グリッド背景やスナップカーソルは除外
+        if (el.hasAttribute('data-grid-bg')) return null;
+        if (el.id === 'snapCursor') return null;
+        return el;
+      }
+      el = el.parentNode;
+    }
+    return null;
+  }
+
   function onPointerDown(evt){
     if (evt.button !== 0) return; // 左クリックのみ
     if (!svgElem) return;
-    drawing = true;
-    svgElem.setPointerCapture(evt.pointerId);
+
     const p = getSVGCoords(evt);
     updateSnapCursor(p);
+
+    // 塗り・消しモードは「クリック処理のみ」
+    if (drawMode === 'fill'){
+      const shape = findShapeElementFromEvent(evt);
+      if (shape){
+        shape.setAttribute('fill', currentColor);
+        syncCodeFromSVG();
+        pushUndo();
+      }
+      evt.preventDefault();
+      return;
+    }
+    if (drawMode === 'erase'){
+      const shape = findShapeElementFromEvent(evt);
+      if (shape){
+        shape.remove();
+        syncCodeFromSVG();
+        pushUndo();
+      }
+      evt.preventDefault();
+      return;
+    }
+
+    // ここからは線・円弧モード（ドラッグ描画）
+    drawing = true;
+    svgElem.setPointerCapture(evt.pointerId);
 
     if (drawMode === 'free'){
       currentD = `M ${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
@@ -509,7 +596,7 @@
       currentPath = document.createElementNS(svgNS,'path');
       currentPath.setAttribute('d', currentD);
       currentPath.setAttribute('fill','none');
-      currentPath.setAttribute('stroke','#000');
+      currentPath.setAttribute('stroke', currentColor);
       currentPath.setAttribute('stroke-width','2');
       currentPath.setAttribute('stroke-linecap','round');
       currentPath.setAttribute('stroke-linejoin','round');
@@ -521,7 +608,7 @@
       const d = `M ${lineStart.x.toFixed(1)} ${lineStart.y.toFixed(1)} L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
       currentPath.setAttribute('d', d);
       currentPath.setAttribute('fill','none');
-      currentPath.setAttribute('stroke','#000');
+      currentPath.setAttribute('stroke', currentColor);
       currentPath.setAttribute('stroke-width','2');
       currentPath.setAttribute('stroke-linecap','round');
       svgElem.appendChild(currentPath);
@@ -535,7 +622,7 @@
         : buildCircleArcPathD(arcStart, arcEnd);
       currentPath.setAttribute('d', d);
       currentPath.setAttribute('fill','none');
-      currentPath.setAttribute('stroke','#000');
+      currentPath.setAttribute('stroke', currentColor);
       currentPath.setAttribute('stroke-width','2');
       currentPath.setAttribute('stroke-linecap','round');
       currentPath.setAttribute('stroke-linejoin','round');
@@ -613,8 +700,12 @@
   // ---- ボタン（描画クリア） ----
   clearBtn.addEventListener('click', () => {
     if (!svgElem) return;
-    const toRemove = svgElem.querySelectorAll('path, polyline');
-    toRemove.forEach(el => el.remove());
+    const toRemove = svgElem.querySelectorAll('path, polyline, polygon, circle, ellipse, rect');
+    toRemove.forEach(el => {
+      if (el.hasAttribute('data-grid-bg')) return; // 背景グリッドは残す
+      if (el.id === 'snapCursor') return;
+      el.remove();
+    });
     syncCodeFromSVG();
     pushUndo();
   });
@@ -639,12 +730,16 @@
     modeLineBtn.classList.toggle('active',      mode === 'line');
     modeArcBtn.classList.toggle('active',       mode === 'arc');
     modeCircleArcBtn.classList.toggle('active', mode === 'circleArc');
+    modeFillBtn.classList.toggle('active',      mode === 'fill');
+    modeEraseBtn.classList.toggle('active',     mode === 'erase');
   }
 
   modeFreeBtn.addEventListener('click', () => setMode('free'));
   modeLineBtn.addEventListener('click', () => setMode('line'));
   modeArcBtn .addEventListener('click', () => setMode('arc'));
   modeCircleArcBtn.addEventListener('click', () => setMode('circleArc'));
+  modeFillBtn.addEventListener('click', () => setMode('fill'));
+  modeEraseBtn.addEventListener('click', () => setMode('erase'));
 
   // ---- 初期化 ----
   setSVGFromString(initialSVG);
